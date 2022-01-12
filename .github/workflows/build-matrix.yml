@@ -1,0 +1,123 @@
+name: Build Extensions
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+  push:
+
+jobs:
+  generate-matrix:
+    name: Generate build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup PHP 8.1
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          coverage: none
+          extensions: none
+          tools: none
+        env:
+          phpts: nts
+
+      - id: set-matrix
+        name: Generate build matrix
+        run: echo "::set-output name=matrix::$(./bin/generate-matrix.php)"
+
+  build-extension:
+    name: Build extension ${{ matrix.extension }} (${{ matrix.php }}-${{ matrix.ts }})
+    runs-on: ubuntu-latest
+    needs: generate-matrix
+    strategy:
+      matrix: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Checkout results
+        uses: actions/checkout@v2
+        with:
+          ref: results
+          path: ./results
+
+      - name: Setup PHP ${{ matrix.php }}-${{ matrix.ts }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          extensions: json
+          tools: none
+        env:
+          phpts: ${{ matrix.ts }}
+
+      - id: check-deps
+        name: Check if ${{ matrix.extension }} has build dependencies
+        run: echo "::set-output name=has-deps::$(./bin/has-build-deps.php ${{ matrix.extension }})"
+
+      - id: deps
+        name: Install build dependencies for ${{ matrix.extension }}
+        if: steps.check-deps.outputs.has-deps == 'yes'
+        run: ./bin/install-build-deps.php ${{ matrix.extension }}
+        # continue-on-error: true
+
+      - id: build
+        name: Build ${{ matrix.extension }}
+        run: ./bin/build-extension.php ${{ matrix.extension }}
+        # continue-on-error: true
+
+      - id: tests
+        if: steps.build.outcome == 'success'
+        name: Run ${{ matrix.extension }} test suite
+        run: ./bin/run-tests.php ${{ matrix.extension }}
+        # continue-on-error: true
+
+      - name: Save deps, build and tests outcomes
+        run: ./bin/save-data.php ./results/data ${{ matrix.extension }} ${{ steps.deps.outcome }} ${{ steps.build.outcome }} ${{ steps.tests.outcome }}
+
+      - name: Commit job result
+        uses: EndBug/add-and-commit@v8
+        with:
+          add: 'data/'
+          cwd: ./results
+          default_author: github_actions
+          message: 'Update ${{ matrix.extension }} results for PHP ${{ matrix.php }}-${{ matrix.ts }}'
+          pull: '--rebase --autostash'
+
+  publish-page:
+    name: Build and publish page
+    runs-on: ubuntu-latest
+    needs: build-extension
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Checkout results
+        uses: actions/checkout@v2
+        with:
+          ref: results
+          path: results
+
+      - name: Setup PHP 8.1
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          coverage: none
+          extensions: none
+          tools: none
+
+      - name: Generate HTML release
+        run: ./bin/build-html.php ./results/data
+
+      - name: Publish generated content to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4.2.2
+        with:
+          folder: ./dist
+          branch: gh-pages
